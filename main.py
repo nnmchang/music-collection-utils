@@ -2,12 +2,14 @@ import abc
 import functools
 import mimetypes
 import os
+import time
 from collections import ChainMap
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
-from typing import Generator, List, Optional, override
+from typing import Generator, Iterator, List, Optional, override
 
+import click
 import mutagen
 from click import argument, group, option
 
@@ -34,7 +36,9 @@ class Operation:
         else:
             return f"{self.op.name}: {self.src}"
 
-    def execute(self):
+    def execute(self, dry_run=False):
+        if dry_run:
+            return
         match self.op:
             case OperationType.Rename:
                 self.__rename()
@@ -75,10 +79,10 @@ class AbstractPath(abc.ABC, dict):
     def exists(self):
         self.path.exists()
 
-    def remove(self):
+    def make_remove_operation(self):
         return Operation(OperationType.Remove, self.path)
 
-    def rename(
+    def make_rename_operation(
         self,
         name_format: str,
         **params,
@@ -87,6 +91,9 @@ class AbstractPath(abc.ABC, dict):
         new_path = self.path.parent.joinpath(new_name)
         if self.path != new_path:
             return Operation(OperationType.Rename, self.path, new_path)
+
+    def make_copy_operation(self, dst: Path):
+        return Operation(OperationType.Copy, self.path, dst)
 
     def __getitem__(self, key):
         if attr := getattr(self, key):
@@ -241,95 +248,90 @@ class AudioDirectory(AbstractPath):
         yield from self.__childs
 
 
+from rich.console import Console
+from rich.live import Live
+from rich.table import Table
+
+
+def execute_operations(ops: Iterator[Operation], dry_run: bool):
+    console = Console()
+    table = Table()
+    table.add_column("Operation")
+    table.add_column("Input")
+    table.add_column("Output")
+    with Live(table, console=console, screen=False, auto_refresh=True):
+        for op in ops:
+            table.add_row(op.op.name, str(op.src), str(op.dst) if op.dst else "")
+            op.execute(dry_run=dry_run)
+
+
 @group
 def cli():
     pass
 
 
+opt_dry_run = option("--dry-run", is_flag=True)
+opt_releative = option("--releative", is_flag=True)
+
+
 @cli.command
 @argument("path", type=Path)
-@option("--dry-run", is_flag=True)
-def cleanup(path: Path, dry_run: bool = False):
-
-    # オーディオ関連ファイル以外を削除
-    def remove_others(base: AudioDirectory):
-        yield from map(lambda o: o.remove(), base.others(releative=True))
-
-    # オーディオファイルが存在しないディレクトリを削除
-    def remove_empty_directories(
-        base: AudioDirectory, is_first=True
-    ) -> Generator[Operation, None, None]:
-        for sub in base.directories():
-            yield from remove_empty_directories(sub, is_first=False)
-        if (
-            # 作業ルートは除外
-            not is_first
-            # 存在するパスを対象
-            and base.path.exists()
-            # オーディオファイルが存在しないフォルダを対象
-            and not base.audio_exists()
-        ):
-            yield base.remove()
+@option("--audio-file-format", type=str, default="{tracknumber:>02}-{title}{ext}")
+@option("--album-format", type=str, default="{album}")
+@opt_releative
+@opt_dry_run
+def rename(
+    path: Path,
+    audio_file_format: str,
+    album_format: str,
+    releative: bool,
+    dry_run: bool,
+):
+    """
+    指定したフォルダのオーディオディレクトリを、フォーマットに従いリネームします
+    """
+    if audio_file_format == "" or album_format == "":
+        print("空のフォーマットは指定できません")
+        return
 
     # リネーム
-    def renames(base: AudioDirectory) -> Generator[Operation, None, None]:
-        for audio in base.audios(releative=True):
-            if op := audio.rename("{tracknumber:>02}-{title}{ext}"):
+    def operations(base: AudioDirectory) -> Generator[Operation, None, None]:
+        for audio in base.audios(releative=releative):
+            if op := audio.make_rename_operation(audio_file_format):
                 yield op
-        for directory in base.directories(releative=True):
+        for directory in base.directories(releative=releative):
             # ディレクトリ内のアルバム名が一意であればリネーム対象
-            albums = set(base.albums())
+            albums = set(directory.albums())
             if len(albums) == 1:
-                if op := directory.rename("{album}", album=albums.pop()):
+                if op := directory.make_rename_operation(
+                    album_format, album=albums.pop()
+                ):
                     yield op
 
-    # オペレーション作成
-    def operations(base: Path):
-        ad = AudioDirectory(base)
-        yield from remove_others(ad)
-        yield from remove_empty_directories(ad)
-        yield from renames(ad)
-
     # 実行
-    for op in operations(path):
-        print(op)
-        if not dry_run:
-            op.execute()
+    execute_operations(operations(AudioDirectory(path)), dry_run)
 
 
 @cli.command
-@argument("src", type=Path)
-@argument("dst", type=Path)
-@option("--dry-run", is_flag=True)
-    # base = AudioDirectory(src)
-def clean_copy(src: Path, dst: Path, dry_run: bool):
-    audio_format = "{tracknumber:>02}-{title}{ext}"
+@argument("src", type=click.Path(exists=True, path_type=Path))
+@argument("dst", type=click.Path(path_type=Path))
+@opt_releative
+@opt_dry_run
+def clean_copy(
+    src: Path,
+    dst: Path,
+    releative: bool,
+    dry_run: bool,
+):
+    """
+    指定したフォルダのオーディオ関連ファイルのみをコピーします
+    """
 
-    def make_album_name(ad: AudioDirectory):
-        albums = set(ad.albums())
-        if len(albums) == 1:
-            return albums.pop()
-        return ad.path.name
+    def operations(current: AudioDirectory):
+        for a in current.audios(releative=releative):
+            yield a.make_copy_operation(dst.joinpath(a.path.relative_to(src)))
 
-    def operations(current: AudioDirectory, parent: Path):
-        for a in current.audios():
-            match a:
-                case AudioMediaFile():
-                    yield Operation(
-                        OperationType.Copy,
-                        a.path,
-                        parent.joinpath(audio_format.format_map(a)),
-                    )
-                case PlaylistFile():
-                    yield Operation(
-                        OperationType.Copy, a.path, parent.joinpath(a.path.name)
-                    )
-        for d in current.directories():
-            if d.audio_exists(True):
-                yield from operations(d, parent=parent.joinpath(make_album_name(d)))
-
-    for i in operations(AudioDirectory(src), dst):
-        i.execute()
+    execute_operations(operations(AudioDirectory(src)), dry_run)
 
 
 cli()
