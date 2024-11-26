@@ -301,8 +301,8 @@ def cleanup(path: Path, dry_run: bool = False):
 @argument("src", type=Path)
 @argument("dst", type=Path)
 @option("--dry-run", is_flag=True)
-def copy(src: Path, dst: Path, dry_run: bool):
     # base = AudioDirectory(src)
+def clean_copy(src: Path, dst: Path, dry_run: bool):
     audio_format = "{tracknumber:>02}-{title}{ext}"
 
     def make_album_name(ad: AudioDirectory):
