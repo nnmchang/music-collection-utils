@@ -218,9 +218,9 @@ class AudioDirectory(AbstractPath):
             if a:
                 yield a
 
-    def audio_exists(self):
+    def audio_exists(self, releative=False):
         try:
-            next(self.audios())
+            next(self.audios(releative=releative))
             return True
         except StopIteration:
             pass
@@ -325,7 +325,8 @@ def clean_copy(src: Path, dst: Path, dry_run: bool):
                         OperationType.Copy, a.path, parent.joinpath(a.path.name)
                     )
         for d in current.directories():
-            yield from operations(d, parent=parent.joinpath(make_album_name(d)))
+            if d.audio_exists(True):
+                yield from operations(d, parent=parent.joinpath(make_album_name(d)))
 
     for i in operations(AudioDirectory(src), dst):
         i.execute()
