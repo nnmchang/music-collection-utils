@@ -215,7 +215,8 @@ class AudioDirectory(AbstractPath):
             for a in self.audios(releative=releative)
             if isinstance(a, AudioMediaFile)
         ):
-            yield a
+            if a:
+                yield a
 
     def audio_exists(self):
         try:
@@ -302,28 +303,32 @@ def cleanup(path: Path, dry_run: bool = False):
 @option("--dry-run", is_flag=True)
 def copy(src: Path, dst: Path, dry_run: bool):
     # base = AudioDirectory(src)
-    audio_format = "{album}/{tracknumber:>02}-{title}{ext}"
+    audio_format = "{tracknumber:>02}-{title}{ext}"
 
-    def operations(base: AudioDirectory):
-        for a in base.audios(releative=True):
+    def make_album_name(ad: AudioDirectory):
+        albums = set(ad.albums())
+        if len(albums) == 1:
+            return albums.pop()
+        return ad.path.name
+
+    def operations(current: AudioDirectory, parent: Path):
+        for a in current.audios():
             match a:
                 case AudioMediaFile():
                     yield Operation(
                         OperationType.Copy,
                         a.path,
-                        dst.joinpath(audio_format.format_map(a)),
+                        parent.joinpath(audio_format.format_map(a)),
                     )
                 case PlaylistFile():
                     yield Operation(
-                        OperationType.Copy,
-                        a.path,
-                        dst.joinpath(a.path.relative_to(src)),
+                        OperationType.Copy, a.path, parent.joinpath(a.path.name)
                     )
+        for d in current.directories():
+            yield from operations(d, parent=parent.joinpath(make_album_name(d)))
 
-    for op in operations(AudioDirectory(src)):
-        print(op)
-        if not dry_run:
-            op.execute()
+    for i in operations(AudioDirectory(src), dst):
+        i.execute()
 
 
 cli()
